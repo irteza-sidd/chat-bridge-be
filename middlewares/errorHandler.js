@@ -1,5 +1,4 @@
 import ErrorResponse from "../utils/errorResponse.js";
-import morgan from "morgan";
 
 // Middleware for handling errors
 
@@ -29,19 +28,6 @@ const errorHandler = (err, req, res, next) => {
       .join(", ");
     error = new ErrorResponse(message, 400);
   }
-
-  // Log the error using Morgan
-  const errorDetails = [
-    `Error: ${error.message || "Internal Server Error"}`,
-    `Stack: ${err.stack || "No stack trace available"}`,
-    `IP: ${req.ip}`,
-    `URL: ${req.originalUrl}`,
-    `Method: ${req.method}`,
-    `Status Code: ${error.statusCode || 500}`,
-  ].join(" | ");
-
-  morgan.token("error-details", () => errorDetails);
-  morgan(":error-details")(req, res, () => {});
 
   // Send the error response to the client
   res.status(error.statusCode || 500).json({

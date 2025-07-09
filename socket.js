@@ -2,7 +2,6 @@ import { Server } from "socket.io";
 import { createServer } from "node:http";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
-import { getInt } from "./utils/env/env.js";
 import ChatRoom from "./models/ChatRoom.js";
 import Message from "./models/Message.js";
 
@@ -253,7 +252,7 @@ const initializeSocket = (app) => {
     });
   });
 
-  const PORT = getInt("PORT", 3003);
+  const PORT = 3000;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
   });

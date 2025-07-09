@@ -1,18 +1,21 @@
 import mongoose from "mongoose";
 import dotenv from "dotenv";
-import { getString } from "../utils/env/env.js";
 
 dotenv.config();
 
-const connectionUrl = process.env.MONGO_URI;
-
-let connection; // Declare a global variable to hold the connection
+let connection;
 
 const connectDB = async () => {
-  const connString = getString(
-    "MONGO_URI",
-    "mongodb://localhost:27017/auth-service"
-  );
+  const connString = process.env.MONGO_URI;
+  console.log("🚀 ~ connectDB ~ connString:", connString);
+
+  if (!connString) {
+    console.error(
+      "MongoDB connection string is not defined in environment variables."
+    );
+    return;
+  }
+
   try {
     mongoose.set("strictQuery", false);
     mongoose.set("strictPopulate", false);
