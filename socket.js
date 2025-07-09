@@ -1,6 +1,7 @@
 import { Server } from "socket.io";
 import { createServer } from "node:http";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 import dotenv from "dotenv";
 import { getTenantDB } from "./config/tenantDB.js";
 import ChatRoomSchema from "./models/ChatRoom.js";
@@ -9,7 +10,7 @@ import MessageSchema from "./models/Message.js";
 dotenv.config();
 
 export let io;
-const usersio = {}; // Global to track user socket IDs across namespaces
+const usersio = {};
 
 export const initializeSocket = (app) => {
   const server = createServer(app);
@@ -18,20 +19,25 @@ export const initializeSocket = (app) => {
     path: "/chat/socket.io",
   });
 
-  // Middleware to extract tenantId and authenticate
   io.use(async (socket, next) => {
-    const { token, tenantId } = socket.handshake.auth;
-    if (!tenantId || !token) {
-      return next(new Error("tenantId and token are required"));
+    const { token, tenantId, apiKey } = socket.handshake.auth;
+    if (!tenantId || !token || !apiKey) {
+      return next(new Error("tenantId, token, and apiKey are required"));
     }
 
     try {
+      const tenant = await mongoose.connection.db
+        .collection("tenants")
+        .findOne({ tenantId, apiKey });
+      if (!tenant) {
+        return next(new Error("Invalid API key or tenant"));
+      }
+
       const decoded = jwt.verify(token, process.env.SECRET_KEY);
       socket.tenantId = tenantId;
       socket.email = decoded.user.email;
       socket.user = decoded.user;
 
-      // Connect to tenant-specific database
       const tenantDB = await getTenantDB(tenantId);
       socket.ChatRoom = tenantDB.model("ChatRoom", ChatRoomSchema);
       socket.Message = tenantDB.model("Message", MessageSchema);
@@ -42,12 +48,10 @@ export const initializeSocket = (app) => {
     }
   });
 
-  // Dynamic namespace for each tenant
   io.of(/^\/chat\/.+$/).on("connection", (socket) => {
     const tenantId = socket.nsp.name.split("/")[2];
     const { ChatRoom, Message } = socket;
 
-    // Tenant-specific user tracking
     const tenantUsersio = usersio[tenantId] || (usersio[tenantId] = {});
     const onlineUsers = {};
 

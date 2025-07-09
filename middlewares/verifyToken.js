@@ -1,32 +1,30 @@
-import ErrorResponse from "../utils/errorResponse.js";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 
-const verifyToken = async (req, res, next) => {
-  let token;
-  if (
-    req.headers.authorization &&
-    req.headers.authorization?.startsWith("Bearer")
-  ) {
-    token = req.headers.authorization.split(" ")[1];
-  }
+export default async (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  const apiKey = req.headers["x-api-key"];
+  const tenantId = req.body.tenantId || req.query.tenantId;
 
-  if (!token) {
-    return next(new ErrorResponse("No access token was provided.", 401));
+  if (!token || !apiKey || !tenantId) {
+    return res
+      .status(401)
+      .json({ error: "Token, API key, and tenantId required" });
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.SECRET_KEY);
-
-    const currentTime = Math.floor(Date.now() / 1000);
-    if (decoded.exp < currentTime) {
-      return next(new ErrorResponse("Token has expired.", 401));
+    const tenant = await mongoose.connection.db
+      .collection("tenants")
+      .findOne({ tenantId, apiKey });
+    if (!tenant) {
+      return res.status(401).json({ error: "Invalid API key or tenant" });
     }
+
+    const decoded = jwt.verify(token, process.env.SECRET_KEY);
     req.user = decoded.user;
-    req.token = token;
     next();
-  } catch (error) {
-    return next(new ErrorResponse("Not authorized to access this route", 401));
+  } catch (err) {
+    console.error(err);
+    res.status(401).json({ error: "Invalid token" });
   }
 };
-
-export default verifyToken;
