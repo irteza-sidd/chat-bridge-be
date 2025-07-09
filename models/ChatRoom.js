@@ -14,35 +14,20 @@ const ChatRoomSchema = new mongoose.Schema(
       },
     },
     groupPhoto: {
-      name: {
-        type: String,
-      },
-      location: {
-        type: String,
-      },
-      key: {
-        type: String,
-      },
+      name: String,
+      location: String,
+      key: String,
     },
     participants: [
       {
         email: { type: String, required: true },
         name: { type: String, required: true },
         profilePicture: {
-          name: {
-            type: String,
-          },
-          location: {
-            type: String,
-          },
-          key: {
-            type: String,
-          },
-          isAdmin: {
-            type: Boolean,
-            default: false,
-          },
+          name: String,
+          location: String,
+          key: String,
         },
+        isAdmin: { type: Boolean, default: false },
       },
     ],
     initiator: {
@@ -53,4 +38,4 @@ const ChatRoomSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-export default mongoose.model("ChatRoom", ChatRoomSchema);
+export default ChatRoomSchema;

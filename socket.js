@@ -2,100 +2,100 @@ import { Server } from "socket.io";
 import { createServer } from "node:http";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
-import ChatRoom from "./models/ChatRoom.js";
-import Message from "./models/Message.js";
+import { getTenantDB } from "./config/tenantDB.js";
+import ChatRoomSchema from "./models/ChatRoom.js";
+import MessageSchema from "./models/Message.js";
 
 dotenv.config();
 
 export let io;
-export let usersio = {};
-let onlineUsers = {};
+const usersio = {}; // Global to track user socket IDs across namespaces
 
-async function handleAllMessagesDelivered(userEmail, socket) {
-  try {
-    const rooms = await ChatRoom.find({
-      "participants.email": userEmail,
-    }).lean();
-
-    if (!rooms.length) {
-      console.log("No chat rooms found for the user.");
-      return;
-    }
-
-    for (const room of rooms) {
-      const chatRoomId = room._id;
-
-      await Message.updateMany(
-        { chatRoomId, status: "sent", "sender.email": { $ne: userEmail } },
-        {
-          $set: {
-            status: "delivered",
-            isSeen: false,
-          },
-        }
-      );
-
-      room.participants.forEach((participant) => {
-        if (participant.email !== userEmail) {
-          const otherUserEmail = participant.email;
-
-          if (usersio[otherUserEmail]) {
-            const socketId = usersio[otherUserEmail];
-            const payLoad = {
-              message: "Messages delivered",
-              deliveredAt: new Date(),
-              chatRoomId,
-            };
-
-            io.to(socketId).emit("messages-delivered", payLoad);
-          }
-        }
-      });
-    }
-  } catch (error) {
-    console.error("Error updating messages:", error);
-
-    // Emit an error to the current user if something goes wrong
-    socket.emit("messages-delivered", {
-      status: "error",
-      message: "An error occurred while updating messages.",
-    });
-  }
-}
-
-const initializeSocket = (app) => {
+export const initializeSocket = (app) => {
   const server = createServer(app);
   io = new Server(server, {
-    cors: {
-      origin: "*",
-    },
+    cors: { origin: "*" },
     path: "/chat/socket.io",
   });
 
+  // Middleware to extract tenantId and authenticate
   io.use(async (socket, next) => {
-    const token = socket.handshake.auth.token;
-    if (token) {
-      jwt.verify(token, process.env.SECRET_KEY, async (err, decoded) => {
-        if (err) {
-          console.error("Authentication error:", err);
-          return next(new Error("Authentication error"));
-        }
-        socket.email = decoded.user.email;
-        usersio[decoded.user.email] = socket.id;
-        socket.user = decoded.user;
-        next();
-      });
-    } else {
+    const { token, tenantId } = socket.handshake.auth;
+    if (!tenantId || !token) {
+      return next(new Error("tenantId and token are required"));
+    }
+
+    try {
+      const decoded = jwt.verify(token, process.env.SECRET_KEY);
+      socket.tenantId = tenantId;
+      socket.email = decoded.user.email;
+      socket.user = decoded.user;
+
+      // Connect to tenant-specific database
+      const tenantDB = await getTenantDB(tenantId);
+      socket.ChatRoom = tenantDB.model("ChatRoom", ChatRoomSchema);
+      socket.Message = tenantDB.model("Message", MessageSchema);
+      next();
+    } catch (err) {
+      console.error("Authentication error:", err);
       next(new Error("Authentication error"));
     }
   });
 
-  io.on("connection", (socket) => {
+  // Dynamic namespace for each tenant
+  io.of(/^\/chat\/.+$/).on("connection", (socket) => {
+    const tenantId = socket.nsp.name.split("/")[2];
+    const { ChatRoom, Message } = socket;
+
+    // Tenant-specific user tracking
+    const tenantUsersio = usersio[tenantId] || (usersio[tenantId] = {});
+    const onlineUsers = {};
+
+    tenantUsersio[socket.email] = socket.id;
     onlineUsers[socket.email] = socket.id;
+
     socket.emit("allOnlineUsers", onlineUsers);
     setTimeout(() => {
-      io.emit("userOnlineStatus", { email: socket.email, status: "online" });
+      socket.nsp.emit("userOnlineStatus", {
+        email: socket.email,
+        status: "online",
+      });
     }, 5000);
+
+    async function handleAllMessagesDelivered(userEmail, socket) {
+      try {
+        const rooms = await ChatRoom.find({
+          "participants.email": userEmail,
+        }).lean();
+
+        for (const room of rooms) {
+          const chatRoomId = room._id;
+          await Message.updateMany(
+            { chatRoomId, status: "sent", "sender.email": { $ne: userEmail } },
+            { $set: { status: "delivered", isSeen: false } }
+          );
+
+          room.participants.forEach((participant) => {
+            if (participant.email !== userEmail) {
+              const socketId = tenantUsersio[participant.email];
+              if (socketId) {
+                socket.nsp.to(socketId).emit("messages-delivered", {
+                  message: "Messages delivered",
+                  deliveredAt: new Date(),
+                  chatRoomId,
+                });
+              }
+            }
+          });
+        }
+      } catch (error) {
+        console.error("Error updating messages:", error);
+        socket.emit("messages-delivered", {
+          status: "error",
+          message: "An error occurred while updating messages.",
+        });
+      }
+    }
 
     handleAllMessagesDelivered(socket.email, socket);
 
@@ -152,27 +152,28 @@ const initializeSocket = (app) => {
             content: messageContent,
             media: messageMedia,
             sender: { email, name },
-            status: status,
+            status,
             messageType,
           });
 
-          io.to(chatRoomId).emit("new-message", {
+          socket.nsp.to(chatRoomId).emit("new-message", {
             ...message.toObject(),
             identifier,
           });
 
           if (room.type === "one-to-one") {
-            const socketId = usersio[otherUser.email];
-
-            io.to(socketId).emit("msg-received", {
-              ...message.toObject(),
-              identifier,
-            });
+            const socketId = tenantUsersio[otherUser.email];
+            if (socketId) {
+              socket.nsp.to(socketId).emit("msg-received", {
+                ...message.toObject(),
+                identifier,
+              });
+            }
           } else {
-            userGroups?.forEach((participant) => {
-              const socketId = usersio[participant.email];
+            userGroups.forEach((participant) => {
+              const socketId = tenantUsersio[participant.email];
               if (socketId) {
-                io.to(socketId).emit("msg-received", {
+                socket.nsp.to(socketId).emit("msg-received", {
                   ...message.toObject(),
                   identifier,
                 });
@@ -182,9 +183,9 @@ const initializeSocket = (app) => {
 
           if (isFirstMsg) {
             const payLoad = { room, latestMessage: message };
-            const socketId = usersio[otherUser.email];
+            const socketId = tenantUsersio[otherUser.email];
             if (socketId) {
-              io.to(socketId).emit("new-chat", payLoad);
+              socket.nsp.to(socketId).emit("new-chat", payLoad);
             }
           }
         } catch (error) {
@@ -197,22 +198,18 @@ const initializeSocket = (app) => {
     socket.on("join-room", (chatRoomId) => {
       socket.join(chatRoomId);
     });
+
     socket.on("seen-all-messages", async (chatRoomId) => {
-      const currentUserEmail = socket?.user?.email;
+      const currentUserEmail = socket.user.email;
       await Message.updateMany(
         {
           chatRoomId,
           "sender.email": { $ne: currentUserEmail },
           isSeen: false,
         },
-        {
-          $set: {
-            isSeen: true,
-            status: "seen",
-          },
-        }
+        { $set: { isSeen: true, status: "seen" } }
       );
-      io.to(chatRoomId).emit("message-seen");
+      socket.nsp.to(chatRoomId).emit("message-seen");
     });
 
     socket.on("leave-room", (chatRoomId) => {
@@ -222,14 +219,10 @@ const initializeSocket = (app) => {
     socket.on("seen-message", async (message) => {
       const updatedMessage = await Message.findByIdAndUpdate(
         message._id,
-        {
-          isSeen: true,
-          status: "seen",
-        },
+        { isSeen: true, status: "seen" },
         { new: true }
       );
-
-      io.to(message.chatRoomId).emit("message-seen", updatedMessage);
+      socket.nsp.to(message.chatRoomId).emit("message-seen", updatedMessage);
     });
 
     socket.on("typing", ({ chatRoomId, isTyping }) => {
@@ -245,19 +238,18 @@ const initializeSocket = (app) => {
 
     socket.on("disconnect", () => {
       delete onlineUsers[socket.email];
-      io.emit("userOnlineStatus", { email: socket.email, status: "offline" });
-      if (socket.userId) {
-        delete usersio[socket.userId];
-      }
+      socket.nsp.emit("userOnlineStatus", {
+        email: socket.email,
+        status: "offline",
+      });
+      delete tenantUsersio[socket.email];
     });
   });
 
-  const PORT = 3000;
+  const PORT = process.env.PORT;
   server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
   });
 
   return io;
 };
-
-export { initializeSocket };

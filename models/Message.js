@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 
-const messageSchema = new mongoose.Schema(
+const MessageSchema = new mongoose.Schema(
   {
     chatRoomId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -11,41 +11,25 @@ const messageSchema = new mongoose.Schema(
       email: { type: String, required: true },
       name: { type: String, required: true },
       profilePicture: {
-        name: {
-          type: String,
-        },
-        location: {
-          type: String,
-        },
-        key: {
-          type: String,
-        },
+        name: String,
+        location: String,
+        key: String,
       },
     },
     contentType: {
       type: String,
       enum: ["text", "image", "video", "audio", "file"],
+      required: true,
     },
-    content: {
-      type: String,
-    },
+    content: String,
     media: [
       {
-        location: {
-          type: String,
-        },
-        key: {
-          type: String,
-        },
-        name: {
-          type: String,
-        },
+        location: String,
+        key: String,
+        name: String,
       },
     ],
-    isSeen: {
-      type: Boolean,
-      default: false,
-    },
+    isSeen: { type: Boolean, default: false },
     status: {
       type: String,
       enum: ["sent", "delivered", "seen"],
@@ -60,4 +44,4 @@ const messageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-export default mongoose.model("Message", messageSchema);
+export default MessageSchema;

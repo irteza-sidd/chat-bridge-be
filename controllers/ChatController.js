@@ -1,15 +1,21 @@
-import ChatRoom from "../models/ChatRoom.js";
-import Message from "../models/Message.js";
-import { io, usersio } from "../socket.js";
-import mongoose from "mongoose";
+import { getTenantDB } from "../config/tenantDB.js";
+import ChatRoomSchema from "../models/ChatRoom.js";
+import MessageSchema from "../models/Message.js";
+import { io } from "../socket.js";
 
 export const getOrCreateOneToOneRoom = async (req, res) => {
-  const { recipientEmail, recipientName, recipientProfilePicture } = req.body;
+  const { tenantId, recipientEmail, recipientName, recipientProfilePicture } =
+    req.body;
   const { email, name, profilePicture } = req.user;
 
-  if (!recipientEmail || !recipientName) {
-    return res.status(400).json({ error: "Recipient details required" });
+  if (!tenantId || !recipientEmail || !recipientName) {
+    return res
+      .status(400)
+      .json({ error: "tenantId and recipient details required" });
   }
+
+  const tenantDB = await getTenantDB(tenantId);
+  const ChatRoom = tenantDB.model("ChatRoom", ChatRoomSchema);
 
   const participants = [
     { email, name, profilePicture },
@@ -50,35 +56,34 @@ export const getOrCreateOneToOneRoom = async (req, res) => {
 };
 
 export const getMyChats = async (req, res) => {
+  const { tenantId } = req.query;
   const { email } = req.user;
+
+  if (!tenantId) {
+    return res.status(400).json({ error: "tenantId is required" });
+  }
+
+  const tenantDB = await getTenantDB(tenantId);
+  const ChatRoom = tenantDB.model("ChatRoom", ChatRoomSchema);
+  const Message = tenantDB.model("Message", MessageSchema);
 
   const rooms = await ChatRoom.find({ "participants.email": email }).lean();
 
-  const grouped = {
-    groups: [],
-    oneToOne: [],
-  };
-
+  const grouped = { groups: [], oneToOne: [] };
   const roomIds = rooms.map((room) => room._id);
+
   const latestMessages = await Message.aggregate([
     { $match: { chatRoomId: { $in: roomIds } } },
     { $sort: { createdAt: -1 } },
-    {
-      $group: {
-        _id: "$chatRoomId",
-        latestMessage: { $first: "$$ROOT" },
-      },
-    },
+    { $group: { _id: "$chatRoomId", latestMessage: { $first: "$$ROOT" } } },
   ]);
 
   const messageMap = {};
-  latestMessages?.forEach((m) => {
+  latestMessages.forEach((m) => {
     messageMap[m._id.toString()] = m.latestMessage;
   });
 
-  const filteredRooms = rooms?.filter(
-    (room) => messageMap[room._id.toString()]
-  );
+  const filteredRooms = rooms.filter((room) => messageMap[room._id.toString()]);
 
   for (const room of filteredRooms) {
     const unseenMessages = await Message.countDocuments({
@@ -108,14 +113,18 @@ export const getMyChats = async (req, res) => {
 };
 
 export const createGroupChat = async (req, res) => {
-  const { groupName, participants, groupPhoto } = req.body;
+  const { tenantId, groupName, participants, groupPhoto } = req.body;
   const { email, name, profilePicture } = req.user;
 
-  if (!groupName || !participants || participants?.length < 2) {
+  if (!tenantId || !groupName || !participants || participants.length < 2) {
     return res.status(400).json({
-      error: "Group name and at least two participants are required",
+      error: "tenantId, group name, and at least two participants are required",
     });
   }
+
+  const tenantDB = await getTenantDB(tenantId);
+  const ChatRoom = tenantDB.model("ChatRoom", ChatRoomSchema);
+  const Message = tenantDB.model("Message", MessageSchema);
 
   const groupParticipants = [
     { email, name, profilePicture, isAdmin: true },
@@ -158,11 +167,13 @@ export const createGroupChat = async (req, res) => {
   await Message.create(defaultMessage);
 
   const payLoad = { room, latestMessage: defaultMessage };
-  room?.participants?.forEach((participant) => {
+  room.participants.forEach((participant) => {
     if (participant.email !== email) {
-      const socketId = usersio[participant.email];
+      const socketId = io
+        .of(`/chat/${tenantId}`)
+        .sockets.get(usersio[tenantId]?.[participant.email])?.id;
       if (socketId) {
-        io.to(socketId).emit("new-chat", payLoad);
+        io.of(`/chat/${tenantId}`).to(socketId).emit("new-chat", payLoad);
       }
     }
   });
@@ -177,22 +188,28 @@ export const createGroupChat = async (req, res) => {
 };
 
 export const getChatRoomMembers = async (req, res) => {
+  const { tenantId } = req.query;
+  const { chatRoomId } = req.params;
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const skip = (page - 1) * limit;
+
+  if (!tenantId) {
+    return res.status(400).json({ error: "tenantId is required" });
+  }
+
   try {
-    const { chatRoomId } = req.params;
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
+    const tenantDB = await getTenantDB(tenantId);
+    const ChatRoom = tenantDB.model("ChatRoom", ChatRoomSchema);
 
     const chatRoom = await ChatRoom.findById(chatRoomId)
       .select("participants")
       .lean();
-
     if (!chatRoom) {
       return res.status(404).json({ error: "Chat room not found" });
     }
 
     const total = chatRoom.participants.length;
-
     const paginatedParticipants = chatRoom.participants.slice(
       skip,
       skip + limit
@@ -201,13 +218,19 @@ export const getChatRoomMembers = async (req, res) => {
     const members = paginatedParticipants.map((participant) => ({
       name: participant.name,
       email: participant.email,
-      isOnline: !!usersio[participant.email],
+      isOnline: !!io
+        .of(`/chat/${tenantId}`)
+        .sockets.get(usersio[tenantId]?.[participant.email]),
     }));
 
     const onlineUserCount = chatRoom.participants.reduce(
-      (count, participant) => {
-        return count + (usersio[participant.email] ? 1 : 0);
-      },
+      (count, participant) =>
+        count +
+        (io
+          .of(`/chat/${tenantId}`)
+          .sockets.get(usersio[tenantId]?.[participant.email])
+          ? 1
+          : 0),
       0
     );
 
@@ -230,11 +253,19 @@ export const getChatRoomMembers = async (req, res) => {
 };
 
 export const getChatRoomMedia = async (req, res) => {
+  const { tenantId } = req.query;
+  const { chatRoomId } = req.params;
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const skip = (page - 1) * limit;
+
+  if (!tenantId) {
+    return res.status(400).json({ error: "tenantId is required" });
+  }
+
   try {
-    const { chatRoomId } = req.params;
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
+    const tenantDB = await getTenantDB(tenantId);
+    const Message = tenantDB.model("Message", MessageSchema);
 
     const messages = await Message.find({
       chatRoomId,
@@ -245,34 +276,26 @@ export const getChatRoomMedia = async (req, res) => {
       .limit(limit)
       .lean();
 
-    const mediaItems = messages?.flatMap((message) =>
+    const mediaItems = messages.flatMap((message) =>
       message.media.map((item) => ({
         contentType: message.contentType,
         location: item.location,
         name: item.name,
         key: item.key,
-        sender: {
-          email: message.sender.email,
-          name: message.sender.name,
-        },
+        sender: { email: message.sender.email, name: message.sender.name },
         createdAt: message.createdAt,
       }))
     );
 
     const total = await Message.countDocuments({
-      chatRoomId: new mongoose.Types.ObjectId(chatRoomId),
+      chatRoomId,
       contentType: { $in: ["image", "video"] },
     });
 
     return res.status(200).json({
       success: true,
       message: "Media fetched successfully",
-      data: {
-        total,
-        page,
-        limit,
-        media: mediaItems,
-      },
+      data: { total, page, limit, media: mediaItems },
     });
   } catch (error) {
     console.error(error);
